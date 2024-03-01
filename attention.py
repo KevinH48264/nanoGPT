@@ -96,6 +96,20 @@ class MultiHeadAttention(nn.Module):
   def forward(self, x):
      return torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, head_size * num_heads) # problem: PyTorch helps run in parallel on the GPU level if you're on a GPU and is parallelized across the multiple cores of the GPU. Tensor operations like dot products or element-wise operations are inherently parallelized on the GPU. No need to maange parallelism explicitly through multithreading or multiprocessing in Python, yay. To leverage, just move to GPU with .to(device) and PyTorch handles the rest, executing model operations in parallel when possible.
 
+class FeedForward(nn.Module):
+  ''' a simple linear layer followed by a non-linearity '''
+
+  def __init__(self, n_embd):
+      super().__init__()
+      self.net = nn.Sequential(
+         nn.Linear(n_embd, n_embd),
+         nn.ReLU(), # just applies ReLU element-wise
+      )
+
+  def forward(self, x):
+      # x is (B, T, n_embd)
+      return self.net(x) # (B, T, n_embd) 
+
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
 
@@ -105,6 +119,7 @@ class BigramLanguageModel(nn.Module):
     self.token_embedding_table = nn.Embedding(vocab_size, n_embd) # NOTE: LOOKUP TABLE, NOT NEURAL NETWORK
     self.position_embedding_table = nn.Embedding(block_size, n_embd) # NOTE: LOOKUP TABLE. need positional encodings which is a learned embedding table for each index and the embedding of that index
     self.sa_heads = MultiHeadAttention(4, n_embd//4) # self-attention head so the output is still (B, T, n_embd) from running 4 heads of 8-dim self attention. Kind of like grouped convolution
+    self.ffwd = FeedForward(n_embd)
     self.lm_head = nn.Linear(n_embd, vocab_size) # go from token embeddings to logits, we need a linear layer # from the n_embed to vocab_size. EFfectively, it's just a weight matrix of size (vocab_size, n_embed) and a bias vector of size (vocab_size, 1)
 
   def forward(self, idx, targets=None):
@@ -115,6 +130,7 @@ class BigramLanguageModel(nn.Module):
     pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,n_embd), it's an array from range 0 to T-1, with step = 1 and tensors put on the device
     x = tok_emb + pos_emb # (B,T,n_embd) # NOTE: broadcasting works here because pos_emb gets right aligned, the batch dimension gets added, and then it just gets added across the batch dimension of tok_emb
     x = self.sa_heads(x) # apply one head of self-attention. (B,T,C)
+    x = self.ffwd(x) # (B,T,C)
     logits = self.lm_head(x) # (B,T,vocab_size). x = token + pos embedding
 
     if targets is None:

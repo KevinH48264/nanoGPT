@@ -13,6 +13,9 @@ learning_rate = 1e-3 # self-attention can't tolerate high learning rates like 1e
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
+n_head = 4
+n_layer = 3
+dropout = 0.2
 # ------------
 
 torch.manual_seed(1337) # for reproducibility
@@ -71,6 +74,8 @@ class Head(nn.Module):
       self.query = nn.Linear(n_embd, head_size, bias=False)
       self.value = nn.Linear(n_embd, head_size, bias=False)
       self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # tril (lower triangular matrix) variable, a buffer (not parameter!) that you don't want to update, but are part of the module / model's state and saved when using torch.save
+      
+      self.dropout = nn.Dropout(dropout)
 
   def forward(self, x):
       B,T,C = x.shape
@@ -81,8 +86,10 @@ class Head(nn.Module):
       wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T), slicing the lower triangular matrix in case T < block_size
       wei = F.softmax(wei, dim=-1) # (B, T, T)
       # perform the weighted aggregation of the values
+      wei = self.dropout(wei)
       v = self.value(x) # (B,T,head_size)
       out = wei @ v # (B, T, T) @ (B, T, head_size) = (B, T, head_size)
+
       return out
 
 class MultiHeadAttention(nn.Module):
@@ -92,10 +99,11 @@ class MultiHeadAttention(nn.Module):
       super().__init__()
       self.heads = nn.ModuleList((Head(head_size) for _ in range(num_heads))) # (B, T, head_size)
       self.proj = nn.Linear(n_embd, n_embd) # (B, T, n_embd)  # projection to help with feature transformation for a better representation space
+      self.dropout = nn.Dropout(dropout)
 
   def forward(self, x):
       out = torch.cat([h(x) for h in self.heads], dim=-1) # (B, T, head_size * num_heads) # problem: PyTorch helps run in parallel on the GPU level if you're on a GPU and is parallelized across the multiple cores of the GPU. Tensor operations like dot products or element-wise operations are inherently parallelized on the GPU. No need to maange parallelism explicitly through multithreading or multiprocessing in Python, yay. To leverage, just move to GPU with .to(device) and PyTorch handles the rest, executing model operations in parallel when possible.
-      out = self.proj(out) # (B, T, n_embd)  # projection to help with feature transformation for a better representation space
+      out = self.dropout(self.proj(out)) # (B, T, n_embd)  # projection to help with feature transformation for a better representation space
       return out
 
 class FeedForward(nn.Module):
@@ -107,6 +115,7 @@ class FeedForward(nn.Module):
          nn.Linear(n_embd, 4 * n_embd),
          nn.ReLU(), # just applies ReLU element-wise
          nn.Linear(4 * n_embd, n_embd), # projection to help with feature transformation for a better representation space
+         nn.Dropout(dropout),
       ) # Note: this is happening on a per-token basis
 
   def forward(self, x):
@@ -138,14 +147,10 @@ class BigramLanguageModel(nn.Module):
     # each token directly reads off the logits for the next token from a lookup table
     self.token_embedding_table = nn.Embedding(vocab_size, n_embd) # NOTE: LOOKUP TABLE, NOT NEURAL NETWORK
     self.position_embedding_table = nn.Embedding(block_size, n_embd) # NOTE: LOOKUP TABLE. need positional encodings which is a learned embedding table for each index and the embedding of that index
-    self.blocks = nn.Sequential(
-       Block(n_embd, n_head=4),
-       Block(n_embd, n_head=4),
-       Block(n_embd, n_head=4),
-       nn.LayerNorm(n_embd), # normally, there's a final layernorm before the final linear layer that predicts logits
-    )
+    self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)]) # Note: * just passes it in as a separate argument (unpacks them)
     # self.sa_heads = MultiHeadAttention(4, n_embd//4) # self-attention head so the output is still (B, T, n_embd) from running 4 heads of 8-dim self attention. Kind of like grouped convolution
     # self.ffwd = FeedForward(n_embd)
+    self.ln_f = nn.LayerNorm(n_embd) # normally, there's a final layernorm before the final linear layer that predicts logits
     self.lm_head = nn.Linear(n_embd, vocab_size) # go from token embeddings to logits, we need a linear layer # from the n_embed to vocab_size. EFfectively, it's just a weight matrix of size (vocab_size, n_embed) and a bias vector of size (vocab_size, 1)
 
   def forward(self, idx, targets=None):
@@ -156,6 +161,7 @@ class BigramLanguageModel(nn.Module):
     pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,n_embd), it's an array from range 0 to T-1, with step = 1 and tensors put on the device
     x = tok_emb + pos_emb # (B,T,n_embd) # NOTE: broadcasting works here because pos_emb gets right aligned, the batch dimension gets added, and then it just gets added across the batch dimension of tok_emb
     x = self.blocks(x) # apply one block of self-attention and feedforward (B, T, n_embd)
+    x = self.ln_f(x) # (B, T, n_embd)
     logits = self.lm_head(x) # (B,T,vocab_size). x = token + pos embedding
 
     if targets is None:

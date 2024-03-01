@@ -193,6 +193,8 @@ class BigramLanguageModel(nn.Module):
   
 model = BigramLanguageModel()
 m = model.to(device) # move model parameters to device
+# print the number of parameters in the model
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters') # numel = number of elements in that parameters / weight matrix. 0.04M = 40k parameters
 
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
